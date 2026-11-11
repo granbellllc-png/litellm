@@ -4539,6 +4539,8 @@ class TestPricingInjectionBlocked:
             ("output_cost_per_second", -1.0),
             ("cache_read_input_token_cost", 0.0),
             ("cache_creation_input_token_cost", -0.05),
+            ("aws_region_name", "us-east-1"),
+            ("base_model", "gpt-3.5-turbo"),
         ],
     )
     def test_pricing_field_rejected_by_default(self, field, value):
