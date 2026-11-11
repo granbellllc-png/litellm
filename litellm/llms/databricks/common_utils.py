@@ -463,9 +463,13 @@ class DatabricksBase:
             api_base = os.getenv("DATABRICKS_API_BASE")
 
         if client_id and client_secret and api_base:
-            # Use OAuth M2M flow (preferred for production)
+            # Use OAuth M2M flow (preferred for production).
+            # Use the cached helper so the token is reused for its full lifetime
+            # (up to 1 hour minus a buffer) instead of fetching a new one on
+            # every request.  Agent and Decisions endpoints already use this
+            # pattern correctly; this brings chat/embeddings/messages into line.
             verbose_logger.debug("Using OAuth M2M authentication for Databricks")
-            access_token: Final = self.get_oauth_m2m_token(api_base, client_id, client_secret)
+            access_token: Final = self.get_cached_oauth_m2m_token(api_base, client_id, client_secret)
             headers = headers or {}
             headers["Authorization"] = f"Bearer {access_token}"
             headers["Content-Type"] = "application/json"

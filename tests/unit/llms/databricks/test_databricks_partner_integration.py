@@ -268,7 +268,12 @@ class TestValidateEnvironmentWithOAuth:
     """Test OAuth M2M is used when credentials are available."""
 
     def test_oauth_used_when_credentials_set(self, monkeypatch):
-        """OAuth M2M is used when client_id and client_secret are set."""
+        """OAuth M2M is used when client_id and client_secret are set.
+
+        After the fix for #50680, databricks_validate_environment uses the
+        *cached* token helper so it no longer issues a new HTTP request on
+        every call.
+        """
         monkeypatch.setenv("DATABRICKS_CLIENT_ID", "test-client-id")
         monkeypatch.setenv("DATABRICKS_CLIENT_SECRET", "test-secret")
         monkeypatch.setenv(
@@ -278,7 +283,7 @@ class TestValidateEnvironmentWithOAuth:
         databricks_base = DatabricksBase()
 
         with patch.object(
-            databricks_base, "get_oauth_m2m_token", return_value="oauth-token"
+            databricks_base, "get_cached_oauth_m2m_token", return_value="oauth-token"
         ) as mock_oauth:
             api_base, headers = databricks_base.databricks_validate_environment(
                 api_key=None,
@@ -290,6 +295,63 @@ class TestValidateEnvironmentWithOAuth:
 
             mock_oauth.assert_called_once()
             assert headers["Authorization"] == "Bearer oauth-token"
+
+    def test_oauth_token_served_from_cache_on_repeated_calls(self, monkeypatch):
+        """Regression test for #50680.
+
+        Before the fix, databricks_validate_environment called the uncached
+        get_oauth_m2m_token() on every request, issuing a redundant HTTP POST
+        to /oidc/v1/token and discarding the token immediately.
+
+        After the fix it uses get_cached_oauth_m2m_token().  This test verifies
+        that a second call with the same credentials does NOT issue a second
+        HTTP request — the token is served from the in-process LRU cache.
+        """
+        from litellm.caching.in_memory_cache import InMemoryCache
+
+        monkeypatch.setenv("DATABRICKS_CLIENT_ID", "cid")
+        monkeypatch.setenv("DATABRICKS_CLIENT_SECRET", "csecret")
+        monkeypatch.setenv(
+            "DATABRICKS_API_BASE", "https://adb-999.azuredatabricks.net/serving-endpoints"
+        )
+
+        databricks_base = DatabricksBase()
+        token_cache: Final = InMemoryCache()
+        fetch_count = 0
+
+        original_get_lifetime = databricks_base.get_oauth_m2m_token_and_lifetime
+
+        from litellm.llms.databricks.common_utils import OAuthM2MToken
+
+        def fake_fetch(api_base, client_id, client_secret):
+            nonlocal fetch_count
+            fetch_count += 1
+            return OAuthM2MToken(access_token="cached-token", expires_in=3600)
+
+        with patch.object(databricks_base, "get_oauth_m2m_token_and_lifetime", side_effect=fake_fetch):
+            # First call — fetches the token and stores it in cache.
+            api_base1, headers1 = databricks_base.databricks_validate_environment(
+                api_key=None,
+                api_base=None,
+                endpoint_type="chat_completions",
+                custom_endpoint=False,
+                headers=None,
+            )
+            # Second call — must reuse the cached token without calling the HTTP endpoint.
+            api_base2, headers2 = databricks_base.databricks_validate_environment(
+                api_key=None,
+                api_base=None,
+                endpoint_type="chat_completions",
+                custom_endpoint=False,
+                headers=None,
+            )
+
+        assert headers1["Authorization"] == "Bearer cached-token"
+        assert headers2["Authorization"] == "Bearer cached-token"
+        assert fetch_count == 1, (
+            f"Expected exactly 1 token fetch (cached on second call) but got {fetch_count}. "
+            "databricks_validate_environment must call get_cached_oauth_m2m_token, not get_oauth_m2m_token."
+        )
 
     def test_pat_used_when_api_key_set(self, monkeypatch):
         """PAT is used when api_key is provided."""
@@ -546,7 +608,7 @@ class TestAuthenticationPriority:
         databricks_base = DatabricksBase()
 
         with patch.object(
-            databricks_base, "get_oauth_m2m_token", return_value="oauth-token"
+            databricks_base, "get_cached_oauth_m2m_token", return_value="oauth-token"
         ) as mock_oauth:
             api_base, headers = databricks_base.databricks_validate_environment(
                 api_key=None,  # No PAT provided - OAuth should be used
@@ -570,7 +632,7 @@ class TestAuthenticationPriority:
 
         # Mock the OAuth call - it will be attempted but PAT should override
         with patch.object(
-            databricks_base, "get_oauth_m2m_token", return_value="oauth-token"
+            databricks_base, "get_cached_oauth_m2m_token", return_value="oauth-token"
         ):
             api_base, headers = databricks_base.databricks_validate_environment(
                 api_key="dapi-explicit-pat",
