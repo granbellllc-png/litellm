@@ -1229,9 +1229,15 @@ class Logging(LiteLLMLoggingBaseClass):
         if model is not None:
             self.model = model
         self.user = user
+        # Strip self-referential litellm_logging_obj to prevent cyclic references that delay garbage collection
+        cleaned_litellm_params = {
+            k: v
+            for k, v in litellm_params.items()
+            if not (k == "litellm_logging_obj" and v is self)
+        }
         self.litellm_params = {
             **self.litellm_params,
-            **scrub_sensitive_keys_in_metadata(litellm_params),
+            **scrub_sensitive_keys_in_metadata(cleaned_litellm_params),
         }
         self.litellm_request_debug = litellm_params.get("litellm_request_debug", False)
         self.logger_fn = litellm_params.get("logger_fn", None)
